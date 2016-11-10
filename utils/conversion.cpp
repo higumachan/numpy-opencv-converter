@@ -7,6 +7,18 @@
  * inside modules/python/src2 folder.
  */
 
+namespace {
+    int* cv_mat_refcount(cv::Mat& mat)
+    {
+        return (mat.u ? &(mat.u->refcount) : nullptr);
+    }
+
+    int* cv_mat_refcount(cv::Mat* mat)
+    {
+        return (mat->u ? &(mat->u->refcount) : nullptr);
+    }
+}
+
 static void init()
 {
     import_array();
@@ -63,7 +75,7 @@ static PyObject* failmsgp(const char *fmt, ...)
   return 0;
 }
 
-#define OPENCV_3 0
+#define OPENCV_3 1
 #if OPENCV_3
 class NumpyAllocator : public MatAllocator
 {
@@ -71,7 +83,7 @@ public:
     NumpyAllocator() { stdAllocator = Mat::getStdAllocator(); }
     ~NumpyAllocator() {}
 
-    UMatData* allocate(PyObject* o, int dims, const int* sizes, int type, size_t* step) const
+    UMatData* allocate(PyObject* o, int dims, const int* sizes, int type, size_t* step, UMatUsageFlags usageFlags) const
     {
         UMatData* u = new UMatData(this);
         u->data = u->origdata = (uchar*)PyArray_DATA((PyArrayObject*) o);
@@ -84,13 +96,14 @@ public:
         return u;
     }
 
-    UMatData* allocate(int dims0, const int* sizes, int type, void* data, size_t* step, int flags) const
+    UMatData* allocate(int dims0, const int* sizes, int type, void* data, size_t* step, int flags, UMatUsageFlags usageFlags) const
     {
         if( data != 0 )
         {
             CV_Error(Error::StsAssert, "The data should normally be NULL!");
             // probably this is safe to do in such extreme case
-            return stdAllocator->allocate(dims0, sizes, type, data, step, flags);
+            return stdAllocator->allocate(dims0, sizes, type, data, step, flags, USAGE_DEFAULT);
+
         }
         PyEnsureGIL gil;
 
@@ -110,12 +123,12 @@ public:
         PyObject* o = PyArray_SimpleNew(dims, _sizes, typenum);
         if(!o)
             CV_Error_(Error::StsError, ("The numpy array of typenum=%d, ndims=%d can not be created", typenum, dims));
-        return allocate(o, dims0, sizes, type, step);
+        return allocate(o, dims0, sizes, type, step, usageFlags);
     }
 
-    bool allocate(UMatData* u, int accessFlags) const
+    bool allocate(UMatData* u, int accessFlags , UMatUsageFlags usageFlags) const
     {
-        return stdAllocator->allocate(u, accessFlags);
+        return stdAllocator->allocate(u, accessFlags, USAGE_DEFAULT);
     }
 
     void deallocate(UMatData* u) const
@@ -185,7 +198,7 @@ public:
   
 
   
-NumpyAllocator g_numpyAllocator;
+NumpyAllocator g_numpyAllocator_;
 
 NDArrayConverter::NDArrayConverter() { init(); }
 
@@ -201,7 +214,7 @@ cv::Mat NDArrayConverter::toMat(const PyObject *o)
     if(!o || o == Py_None)
     {
         if( !m.data )
-            m.allocator = &g_numpyAllocator;
+            m.allocator = &g_numpyAllocator_;
     }
 
     if( !PyArray_Check(o) )
@@ -274,7 +287,7 @@ cv::Mat NDArrayConverter::toMat(const PyObject *o)
     }
     
     m = Mat(ndims, size, type, PyArray_DATA(o), step);
-    // m.u = g_numpyAllocator.allocate(o, ndims, size, type, step);
+    // m.u = g_numpyAllocator_.allocate(o, ndims, size, type, step);
     
     if( m.data )
     {
@@ -282,17 +295,17 @@ cv::Mat NDArrayConverter::toMat(const PyObject *o)
       m.addref();
       Py_INCREF(o);
 #else
-        m.refcount = refcountFromPyObject(o);
+        cv_mat_refcount(m) = refcountFromPyObject(o);
         m.addref(); // protect the original numpy array from deallocation
                     // (since Mat destructor will decrement the reference counter)
 #endif
     };
-    m.allocator = &g_numpyAllocator;
+    m.allocator = &g_numpyAllocator_;
 
     if( transposed )
     {
         Mat tmp;
-        tmp.allocator = &g_numpyAllocator;
+        tmp.allocator = &g_numpyAllocator_;
         transpose(m, tmp);
         m = tmp;
     }
@@ -305,9 +318,9 @@ PyObject* NDArrayConverter::toNDArray(const cv::Mat& m)
   if( !m.data )
         Py_RETURN_NONE;
     Mat temp, *p = (Mat*)&m;
-    if(!p->u || p->allocator != &g_numpyAllocator)
+    if(!p->u || p->allocator != &g_numpyAllocator_)
     {
-        temp.allocator = &g_numpyAllocator;
+        temp.allocator = &g_numpyAllocator_;
         m.copyTo(temp);
         p = &temp;
     }
@@ -320,14 +333,14 @@ PyObject* NDArrayConverter::toNDArray(const cv::Mat& m)
     if( !m.data )
       Py_RETURN_NONE;
     Mat temp, *p = (Mat*)&m;
-    if(!p->refcount || p->allocator != &g_numpyAllocator)
+    if(!cv_mat_refcount(p) || p->allocator != &g_numpyAllocator_)
     {
-        temp.allocator = &g_numpyAllocator;
+        temp.allocator = &g_numpyAllocator_;
         ERRWRAP2(m.copyTo(temp));
         p = &temp;
     }
     p->addref();
-    return pyObjectFromRefcount(p->refcount);
+    return pyObjectFromRefcount(cv_mat_refcount(p));
 #endif
 
 }
