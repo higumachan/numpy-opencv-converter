@@ -10,6 +10,7 @@ function(boost_python_module NAME)
   find_package(PythonLibs REQUIRED)
 
   set(DEP_LIBS
+	${Boost_LIBRARIES}
     ${Boost_PYTHON_LIBRARY}
     ${PYTHON_LIBRARIES}
     )
